@@ -1,7 +1,7 @@
-# Roomrs - Zoho CRM Automation
+# CRM Audit
 
 ## Overview
-Automation tools for Roomrs property management via Zoho CRM MCP integration.
+Daily availability audit for Roomrs property management via Zoho CRM MCP integration.
 
 ## CRM Data Model
 

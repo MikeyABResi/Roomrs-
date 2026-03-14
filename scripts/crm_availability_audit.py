@@ -277,6 +277,13 @@ if __name__ == "__main__":
 
     print("\n" + report + "\n")
 
+    # Save report to file
+    today_str = date.today().strftime("%Y-%m-%d")
+    report_path = f"report_{today_str}.txt"
+    with open(report_path, "w") as f:
+        f.write(report)
+    print(f"Report saved to {report_path}")
+
     # Send to Slack
     send_slack(report)
 

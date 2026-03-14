@@ -26,3 +26,10 @@ jobs:
           ZOHO_CRM_REFRESH_TOKEN: ${{ secrets.ZOHO_CRM_REFRESH_TOKEN }}
           EMAIL_TO: mikey@roorms.com
         run: python scripts/crm_availability_audit.py
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: report_*.txt
+          retention-days: 30

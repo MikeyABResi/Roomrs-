@@ -119,30 +119,46 @@ def run_audit():
         # Renewal fee of $0 means not eligible regardless of tier
         is_zero_renewal = renewal_fee is not None and float(renewal_fee) == 0
 
-        # Find active EL: Current_Lease_To matches Deal's Lease To and not in past
+        # Find active EL: not closed
+        # "Renewed" = always closed (new cycle started)
+        # "Declined" = only closed if Current_Lease_To is in the past (tenant moved out)
         deal_els = el_by_deal.get(deal_id, [])
         active_el = None
+
+        def is_el_closed(el):
+            decision = el.get("Decision") or ""
+            if decision == "Renewed":
+                return True
+            if decision == "Declined":
+                el_lease_to = el.get("Current_Lease_To") or ""
+                return el_lease_to < today  # Only closed if tenant already left
+            return False
+
+        # First pass: find active EL that matches Lease To date
         for el in deal_els:
             el_lease_to = el.get("Current_Lease_To")
-            if el_lease_to and el_lease_to == lease_to and el_lease_to >= today:
+            if not is_el_closed(el) and el_lease_to == lease_to:
                 active_el = el
                 break
 
-        # If no exact match on future date, try matching just the date (may be past but recent)
+        # Second pass: find any active EL (even if date doesn't match)
         if not active_el:
             for el in deal_els:
-                if el.get("Current_Lease_To") == lease_to:
+                if not is_el_closed(el):
                     active_el = el
                     break
 
         # Rule 1: Must have an active EL
         if not active_el:
+            # Check if all ELs are closed
+            closed_els = [el for el in deal_els if is_el_closed(el)]
             no_active_el.append({
                 "deal": deal_name,
                 "room": room_name,
                 "membership": membership,
                 "lease_to": lease_to,
                 "el_count": len(deal_els),
+                "all_closed": len(closed_els) == len(deal_els) and len(deal_els) > 0,
             })
             continue
 
@@ -222,8 +238,12 @@ def format_report(deals, no_active_el, eligibility_issues, moveout_issues, decli
     lines.append(f"*Missing Active Expiring Lease ({len(no_active_el)}):*")
     if no_active_el:
         for r in no_active_el:
-            el_note = (f" ({r['el_count']} EL records, none match Lease To)"
-                       if r['el_count'] > 0 else " (no EL records at all)")
+            if r.get('all_closed'):
+                el_note = f" (has {r['el_count']} closed EL records — needs new active EL)"
+            elif r['el_count'] > 0:
+                el_note = f" ({r['el_count']} EL records, none active)"
+            else:
+                el_note = " (no EL records at all)"
             lines.append(f"  - {r['deal']} -- {r['room']} | {r['membership']} | "
                          f"Lease To: {r['lease_to']}{el_note}")
     else:

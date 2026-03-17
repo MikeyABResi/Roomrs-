@@ -76,7 +76,7 @@ def run_audit():
     deals = coql_query_paginated(
         token,
         "select Deal_Name, Stage, Room, Membership_Tier, New_Move_out_Date2, "
-        "Move_out_date, id "
+        "Move_out_date, Renewal_Fee, id "
         "from Deals where Stage = 'Moved In' and Room is not null "
         "order by Deal_Name asc"
     )
@@ -114,7 +114,10 @@ def run_audit():
         lease_to = deal.get("Move_out_date")        # Lease To date
         room = deal.get("Room", {})
         room_name = room.get("name", "Unknown") if isinstance(room, dict) else "Unknown"
+        renewal_fee = deal.get("Renewal_Fee")
         is_basic = membership == "Basic"
+        # Renewal fee of $0 means not eligible regardless of tier
+        is_zero_renewal = renewal_fee is not None and float(renewal_fee) == 0
 
         # Find active EL: Current_Lease_To matches Deal's Lease To and not in past
         deal_els = el_by_deal.get(deal_id, [])
@@ -147,20 +150,24 @@ def run_audit():
         el_decision = active_el.get("Decision") or ""
 
         # Rule 2: Eligibility check
-        if is_basic:
-            # Basic should be "Not eligible for renewal" (or "Airbnb Tenant")
-            if el_eligibility not in ("Not eligible for renewal",
-                                       "Not eligible - Roomrs Decision",
-                                       "Airbnb Tenant"):
+        # Basic OR Renewal Fee = $0 → should be "Not eligible"
+        should_be_ineligible = is_basic or is_zero_renewal
+        not_eligible_values = ("Not eligible for renewal",
+                               "Not eligible - Roomrs Decision",
+                               "Airbnb Tenant")
+
+        if should_be_ineligible:
+            if el_eligibility not in not_eligible_values:
+                reason = "Basic" if is_basic else f"Renewal Fee = $0"
                 eligibility_issues.append({
                     "deal": deal_name,
                     "room": room_name,
                     "membership": membership,
                     "eligibility": el_eligibility,
-                    "expected": "Not eligible for renewal",
+                    "expected": f"Not eligible for renewal ({reason})",
                 })
         else:
-            # Non-basic (Legacy, Plus, Premium, Full Apartment) should be eligible
+            # Non-basic with renewal fee > $0 should be eligible
             if el_eligibility != "Eligible for renewal":
                 eligibility_issues.append({
                     "deal": deal_name,

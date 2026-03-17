@@ -96,6 +96,17 @@ def run_audit():
     )
     print(f"  → {len(early_deals)} early-stage deals")
 
+    # Step 4: Fetch ALL open deals (onboarding check — any non-closed, non-Moved-In deal)
+    print("Fetching all open deals (onboarding check)...")
+    onboarding_deals = coql_query_paginated(
+        token,
+        "select Deal_Name, Stage, Room, id "
+        "from Deals where Stage not in ('Moved In', 'Past Deal', 'Closed Lost', "
+        "'Closed-Lost to Competition', 'Disqualified') "
+        "and Room is not null order by Deal_Name asc"
+    )
+    print(f"  → {len(onboarding_deals)} open deals")
+
     # Build mappings: room_id → deals
     mi_by_room = {}  # room_id → list of Moved-In deals
     for d in moved_in_deals:
@@ -109,7 +120,13 @@ def run_audit():
         if rid:
             early_by_room.setdefault(rid, []).append(d)
 
-    # Step 4: Apply audit rules
+    onboard_by_room = {}  # room_id → list of onboarding deals (any open deal)
+    for d in onboarding_deals:
+        rid = d.get("Room", {}).get("id") if isinstance(d.get("Room"), dict) else None
+        if rid:
+            onboard_by_room.setdefault(rid, []).append(d)
+
+    # Step 5: Apply audit rules
     rule1 = []  # Should be Available
     rule2 = []  # Should be Not Available
     rule3 = []  # Should be In Process
@@ -126,11 +143,14 @@ def run_audit():
         if mi_deals:
             # Check move-out (New_Move_out_Date2 ONLY — NOT Move_out_date)
             has_move_out = False
+            has_onboarding = len(onboard_by_room.get(room_id, [])) > 0
             for d in mi_deals:
                 mo = d.get("New_Move_out_Date2")
                 if mo and mo >= today:
                     has_move_out = True
-                    if sales_status != "Available":
+                    # If there's an onboarding deal for a new tenant, the current
+                    # status (In Process / Not Available) is correct — don't flag
+                    if sales_status != "Available" and not has_onboarding:
                         rule1.append({
                             "room": room_name,
                             "current": sales_status,

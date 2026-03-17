@@ -5,11 +5,18 @@ CRM Audit — Deals vs. Expiring Leases
 Validates data consistency between Moved-In Deals and their
 associated Expiring Lease records. Flags missing EL records,
 mismatched eligibility, and incorrect move-out/decision combos.
+
+Rules:
+  - Every Moved-In deal must have an active EL (Current_Lease_To = Deal Lease To, not in past)
+  - Basic membership: Eligibility = "Not eligible for renewal", Move-Out filled if Declined
+  - Non-Basic (Legacy, Plus, Premium, Full Apartment): Eligibility = "Eligible for renewal"
+  - Declined (any tier): Move-Out must be filled
+  - Non-Basic + not Declined: Move-Out should be empty
+  - Pending Decision is acceptable for any tier (not officially decided yet)
 """
 
 import os
 import sys
-import json
 import requests
 from datetime import date
 
@@ -62,6 +69,7 @@ def coql_query_paginated(token, base_query):
 
 def run_audit():
     token = get_access_token()
+    today = date.today().isoformat()
 
     # Step 1: Fetch all Moved-In deals
     print("Fetching Moved-In deals...")
@@ -72,20 +80,20 @@ def run_audit():
         "from Deals where Stage = 'Moved In' and Room is not null "
         "order by Deal_Name asc"
     )
-    print(f"  → {len(deals)} Moved-In deals")
+    print(f"  -> {len(deals)} Moved-In deals")
 
-    # Step 2: Fetch all Expiring Lease records
+    # Step 2: Fetch all Expiring Lease records with a Deal link
     print("Fetching Expiring Lease records...")
     leases = coql_query_paginated(
         token,
         "select Name, Eligibility, Decision, Membership_Tier, Deal, Room, "
-        "Current_Lease_To, Effective_Move_Out, id "
+        "Current_Lease_To, Effective_Move_Out, Status, id "
         "from Expiring_Leases where Deal is not null "
         "order by Name asc"
     )
-    print(f"  → {len(leases)} Expiring Lease records")
+    print(f"  -> {len(leases)} Expiring Lease records")
 
-    # Build mapping: deal_id → list of EL records
+    # Build mapping: deal_id -> list of EL records
     el_by_deal = {}
     for el in leases:
         deal_ref = el.get("Deal")
@@ -94,27 +102,35 @@ def run_audit():
 
     # Step 3: Apply audit rules
     no_active_el = []       # Deals with no active EL
-    basic_issues = []       # Basic membership data mismatches
-    non_basic_issues = []   # Non-basic membership data mismatches
-    declined_issues = []    # Declined decision but no move-out
+    eligibility_issues = [] # Wrong eligibility for membership tier
+    moveout_issues = []     # Move-out date inconsistencies
+    declined_no_mo = []     # Declined but no move-out date
 
     for deal in deals:
         deal_id = deal["id"]
         deal_name = deal.get("Deal_Name", "Unknown")
         membership = deal.get("Membership_Tier", "")
-        move_out = deal.get("New_Move_out_Date2")
-        lease_to = deal.get("Move_out_date")  # Lease To date
+        move_out = deal.get("New_Move_out_Date2")  # Actual Move Out
+        lease_to = deal.get("Move_out_date")        # Lease To date
         room = deal.get("Room", {})
         room_name = room.get("name", "Unknown") if isinstance(room, dict) else "Unknown"
         is_basic = membership == "Basic"
 
-        # Find active EL: Current_Lease_To matches Deal's Lease To date
+        # Find active EL: Current_Lease_To matches Deal's Lease To and not in past
         deal_els = el_by_deal.get(deal_id, [])
         active_el = None
         for el in deal_els:
-            if el.get("Current_Lease_To") == lease_to:
+            el_lease_to = el.get("Current_Lease_To")
+            if el_lease_to and el_lease_to == lease_to and el_lease_to >= today:
                 active_el = el
                 break
+
+        # If no exact match on future date, try matching just the date (may be past but recent)
+        if not active_el:
+            for el in deal_els:
+                if el.get("Current_Lease_To") == lease_to:
+                    active_el = el
+                    break
 
         # Rule 1: Must have an active EL
         if not active_el:
@@ -127,112 +143,112 @@ def run_audit():
             })
             continue
 
-        el_eligibility = active_el.get("Eligibility", "")
-        el_decision = active_el.get("Decision", "")
+        el_eligibility = active_el.get("Eligibility") or ""
+        el_decision = active_el.get("Decision") or ""
 
-        # Rule 2: Basic membership checks
+        # Rule 2: Eligibility check
         if is_basic:
-            issues = []
-            if "not eligible" not in (el_eligibility or "").lower():
-                issues.append(f"Eligibility is \"{el_eligibility}\" (expected Not Eligible)")
-            if not move_out:
-                issues.append("Move-Out Date is empty (should be filled)")
-            if el_decision != "Declined":
-                issues.append(f"Decision is \"{el_decision}\" (expected Declined)")
-            if issues:
-                basic_issues.append({
+            # Basic should be "Not eligible for renewal" (or "Airbnb Tenant")
+            if el_eligibility not in ("Not eligible for renewal",
+                                       "Not eligible - Roomrs Decision",
+                                       "Airbnb Tenant"):
+                eligibility_issues.append({
                     "deal": deal_name,
                     "room": room_name,
                     "membership": membership,
-                    "issues": issues,
+                    "eligibility": el_eligibility,
+                    "expected": "Not eligible for renewal",
+                })
+        else:
+            # Non-basic (Legacy, Plus, Premium, Full Apartment) should be eligible
+            if el_eligibility != "Eligible for renewal":
+                eligibility_issues.append({
+                    "deal": deal_name,
+                    "room": room_name,
+                    "membership": membership,
+                    "eligibility": el_eligibility,
+                    "expected": "Eligible for renewal",
                 })
 
-        # Rule 3: Non-basic membership checks
-        else:
-            issues = []
-            if "eligible for renewal" not in (el_eligibility or "").lower():
-                issues.append(f"Eligibility is \"{el_eligibility}\" (expected Eligible for Renewal)")
-            if el_decision == "Declined":
-                # Exception: Declined means move-out must be filled
-                if not move_out:
-                    issues.append("Decision is Declined but Move-Out Date is empty")
-            else:
-                # Not declined: move-out should be empty
-                if move_out:
-                    issues.append(f"Move-Out Date is {move_out} but Decision is \"{el_decision}\" (should be empty unless Declined)")
-                if el_decision not in ("Pending Decision", "Accepted"):
-                    issues.append(f"Decision is \"{el_decision}\" (expected Pending Decision or Accepted)")
-            if issues:
-                non_basic_issues.append({
+        # Rule 3: Declined (any tier) -> Move-Out must be filled
+        is_declined = "declined" in el_decision.lower() if el_decision else False
+        if is_declined and not move_out:
+            declined_no_mo.append({
+                "deal": deal_name,
+                "room": room_name,
+                "membership": membership,
+                "decision": el_decision,
+            })
+
+        # Rule 4: Non-basic + not declined -> Move-Out should be empty
+        if not is_basic and not is_declined and move_out:
+            # Exception: Lease Break, Transfer also justify move-out
+            if el_decision not in ("Lease Break", "Transfer Request", "Transfered"):
+                moveout_issues.append({
                     "deal": deal_name,
                     "room": room_name,
                     "membership": membership,
                     "decision": el_decision,
-                    "issues": issues,
+                    "move_out": move_out,
                 })
 
-        # Rule 4: Declined (any tier) must have move-out
-        if el_decision == "Declined" and not move_out:
-            declined_issues.append({
-                "deal": deal_name,
-                "room": room_name,
-                "membership": membership,
-            })
-
-    return deals, no_active_el, basic_issues, non_basic_issues, declined_issues
+    return deals, no_active_el, eligibility_issues, moveout_issues, declined_no_mo
 
 
 # ── Report Formatting ───────────────────────────────────────────────
 
-def format_report(deals, no_active_el, basic_issues, non_basic_issues, declined_issues):
+def format_report(deals, no_active_el, eligibility_issues, moveout_issues, declined_no_mo):
     today_str = date.today().strftime("%B %d, %Y")
-    total_issues = len(no_active_el) + len(basic_issues) + len(non_basic_issues) + len(declined_issues)
+    total = len(no_active_el) + len(eligibility_issues) + len(moveout_issues) + len(declined_no_mo)
 
     lines = [
-        f"*Deals vs. Expiring Leases Audit — {today_str}*",
-        f"Deals audited: {len(deals)} | Issues found: {total_issues}",
+        f"*Deals vs. Expiring Leases Audit -- {today_str}*",
+        f"Deals audited: {len(deals)} | Issues found: {total}",
         "",
     ]
 
-    if total_issues == 0:
-        lines.append("All clear — no inconsistencies found.")
+    if total == 0:
+        lines.append("All clear -- no inconsistencies found.")
         return "\n".join(lines)
 
-    # No active EL
+    # Missing active EL
     lines.append(f"*Missing Active Expiring Lease ({len(no_active_el)}):*")
     if no_active_el:
         for r in no_active_el:
-            el_note = f" ({r['el_count']} EL records, none match Lease To)" if r['el_count'] > 0 else " (no EL records at all)"
-            lines.append(f"  • {r['deal']} — {r['room']} | {r['membership']} | Lease To: {r['lease_to']}{el_note}")
+            el_note = (f" ({r['el_count']} EL records, none match Lease To)"
+                       if r['el_count'] > 0 else " (no EL records at all)")
+            lines.append(f"  - {r['deal']} -- {r['room']} | {r['membership']} | "
+                         f"Lease To: {r['lease_to']}{el_note}")
     else:
         lines.append("  No issues")
     lines.append("")
 
-    # Basic mismatches
-    lines.append(f"*Basic Membership Mismatches ({len(basic_issues)}):*")
-    if basic_issues:
-        for r in basic_issues:
-            for issue in r["issues"]:
-                lines.append(f"  • {r['deal']} — {r['room']} | {issue}")
+    # Eligibility mismatches
+    lines.append(f"*Eligibility Mismatches ({len(eligibility_issues)}):*")
+    if eligibility_issues:
+        for r in eligibility_issues:
+            lines.append(f"  - {r['deal']} -- {r['room']} | {r['membership']} | "
+                         f"Eligibility: \"{r['eligibility']}\" (expected \"{r['expected']}\")")
     else:
         lines.append("  No issues")
     lines.append("")
 
-    # Non-basic mismatches
-    lines.append(f"*Non-Basic Membership Mismatches ({len(non_basic_issues)}):*")
-    if non_basic_issues:
-        for r in non_basic_issues:
-            for issue in r["issues"]:
-                lines.append(f"  • {r['deal']} — {r['room']} | {issue}")
+    # Move-out should be empty
+    lines.append(f"*Move-Out Filled but Not Declined ({len(moveout_issues)}):*")
+    if moveout_issues:
+        for r in moveout_issues:
+            lines.append(f"  - {r['deal']} -- {r['room']} | {r['membership']} | "
+                         f"Decision: \"{r['decision']}\" | Move-Out: {r['move_out']}")
     else:
         lines.append("  No issues")
     lines.append("")
 
     # Declined without move-out
-    lines.append(f"*Declined but No Move-Out ({len(declined_issues)}):*")
-    if declined_issues:
-        for r in declined_issues:
-            lines.append(f"  • {r['deal']} — {r['room']} | {r['membership']}")
+    lines.append(f"*Declined but No Move-Out Date ({len(declined_no_mo)}):*")
+    if declined_no_mo:
+        for r in declined_no_mo:
+            lines.append(f"  - {r['deal']} -- {r['room']} | {r['membership']} | "
+                         f"Decision: \"{r['decision']}\"")
     else:
         lines.append("  No issues")
 
@@ -243,7 +259,7 @@ def format_report(deals, no_active_el, basic_issues, non_basic_issues, declined_
 
 def send_slack(report):
     if not SLACK_WEBHOOK_URL:
-        print("SLACK_WEBHOOK_URL not set — skipping Slack")
+        print("SLACK_WEBHOOK_URL not set -- skipping Slack")
         return
     resp = requests.post(SLACK_WEBHOOK_URL, json={"text": report})
     if resp.status_code == 200:
@@ -256,11 +272,11 @@ def send_slack(report):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("CRM Audit — Deals vs. Expiring Leases")
+    print("CRM Audit -- Deals vs. Expiring Leases")
     print("=" * 60)
 
-    deals, no_active_el, basic_issues, non_basic_issues, declined_issues = run_audit()
-    report = format_report(deals, no_active_el, basic_issues, non_basic_issues, declined_issues)
+    deals, no_active_el, eligibility_issues, moveout_issues, declined_no_mo = run_audit()
+    report = format_report(deals, no_active_el, eligibility_issues, moveout_issues, declined_no_mo)
 
     print("\n" + report + "\n")
 
@@ -274,6 +290,6 @@ if __name__ == "__main__":
     # Send to Slack
     send_slack(report)
 
-    total_issues = len(no_active_el) + len(basic_issues) + len(non_basic_issues) + len(declined_issues)
-    print(f"\nDone. {total_issues} issues flagged.")
+    total = len(no_active_el) + len(eligibility_issues) + len(moveout_issues) + len(declined_no_mo)
+    print(f"\nDone. {total} issues flagged.")
     sys.exit(0)

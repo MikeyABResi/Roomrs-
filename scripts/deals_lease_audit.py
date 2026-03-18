@@ -76,7 +76,7 @@ def run_audit():
     deals = coql_query_paginated(
         token,
         "select Deal_Name, Stage, Room, Membership_Tier, New_Move_out_Date2, "
-        "Move_out_date, Renewal_Fee, id "
+        "Move_out_date, Renewal_Fee, Lead_Source, id "
         "from Deals where Stage = 'Moved In' and Room is not null "
         "order by Deal_Name asc"
     )
@@ -115,7 +115,9 @@ def run_audit():
         room = deal.get("Room", {})
         room_name = room.get("name", "Unknown") if isinstance(room, dict) else "Unknown"
         renewal_fee = deal.get("Renewal_Fee")
+        lead_source = deal.get("Lead_Source") or ""
         is_basic = membership == "Basic"
+        is_airbnb = lead_source == "Airbnb"
         # Legacy with $0 renewal fee = not eligible (special case)
         is_legacy_zero = membership == "Legacy" and renewal_fee is not None and float(renewal_fee) == 0
 
@@ -166,11 +168,20 @@ def run_audit():
         el_decision = active_el.get("Decision") or ""
 
         # Rule 2: Eligibility check
-        # Basic → Not eligible for renewal
-        # Legacy with $0 renewal fee → Not eligible (don't flag)
-        # Everything else → Eligible for renewal
-        should_be_not_eligible = is_basic or is_legacy_zero
-        if should_be_not_eligible:
+        # Airbnb lead source → "Airbnb Tenant"
+        # Basic → "Not eligible for renewal"
+        # Legacy with $0 renewal fee → "Not eligible for renewal"
+        # Everything else → "Eligible for renewal"
+        if is_airbnb:
+            if el_eligibility != "Airbnb Tenant":
+                eligibility_issues.append({
+                    "deal": deal_name,
+                    "room": room_name,
+                    "membership": membership,
+                    "eligibility": el_eligibility,
+                    "expected": "Airbnb Tenant (Lead Source = Airbnb)",
+                })
+        elif is_basic or is_legacy_zero:
             if el_eligibility != "Not eligible for renewal":
                 reason = "Basic" if is_basic else "Legacy ($0 renewal fee)"
                 eligibility_issues.append({
@@ -202,7 +213,8 @@ def run_audit():
 
         # Rule 4: Not eligible + no move-out + decision != Accepted → flag
         is_accepted = "accepted" in el_decision.lower() if el_decision else False
-        if el_eligibility == "Not eligible for renewal" and not move_out and not is_accepted:
+        not_eligible = el_eligibility in ("Not eligible for renewal", "Airbnb Tenant")
+        if not_eligible and not move_out and not is_accepted:
             not_eligible_no_mo.append({
                 "deal": deal_name,
                 "room": room_name,

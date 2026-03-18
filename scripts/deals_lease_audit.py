@@ -76,7 +76,7 @@ def run_audit():
     deals = coql_query_paginated(
         token,
         "select Deal_Name, Stage, Room, Membership_Tier, New_Move_out_Date2, "
-        "Move_out_date, id "
+        "Move_out_date, Renewal_Fee, id "
         "from Deals where Stage = 'Moved In' and Room is not null "
         "order by Deal_Name asc"
     )
@@ -114,7 +114,10 @@ def run_audit():
         lease_to = deal.get("Move_out_date")        # Lease To date
         room = deal.get("Room", {})
         room_name = room.get("name", "Unknown") if isinstance(room, dict) else "Unknown"
+        renewal_fee = deal.get("Renewal_Fee")
         is_basic = membership == "Basic"
+        # Legacy with $0 renewal fee = not eligible (special case)
+        is_legacy_zero = membership == "Legacy" and renewal_fee is not None and float(renewal_fee) == 0
 
         # Find active EL: not closed
         # "Renewed" = always closed (new cycle started)
@@ -164,15 +167,18 @@ def run_audit():
 
         # Rule 2: Eligibility check
         # Basic → Not eligible for renewal
-        # Everything else (Plus, Premium, Legacy, etc.) → Eligible for renewal
-        if is_basic:
+        # Legacy with $0 renewal fee → Not eligible (don't flag)
+        # Everything else → Eligible for renewal
+        should_be_not_eligible = is_basic or is_legacy_zero
+        if should_be_not_eligible:
             if el_eligibility != "Not eligible for renewal":
+                reason = "Basic" if is_basic else "Legacy ($0 renewal fee)"
                 eligibility_issues.append({
                     "deal": deal_name,
                     "room": room_name,
                     "membership": membership,
                     "eligibility": el_eligibility,
-                    "expected": "Not eligible for renewal",
+                    "expected": f"Not eligible for renewal ({reason})",
                 })
         else:
             if el_eligibility != "Eligible for renewal":

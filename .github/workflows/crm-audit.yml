@@ -1,0 +1,35 @@
+name: CRM Availability Audit
+
+on:
+  schedule:
+    - cron: '0 13 * * *'  # 8 AM EST / 9 AM EDT daily
+  workflow_dispatch:        # Manual trigger
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run CRM Availability Audit
+        env:
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+          ZOHO_CRM_REFRESH_TOKEN: ${{ secrets.ZOHO_CRM_REFRESH_TOKEN }}
+          EMAIL_TO: mikey@roorms.com
+        run: python scripts/crm_availability_audit.py
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: report_*.txt
+          retention-days: 30

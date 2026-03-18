@@ -103,7 +103,6 @@ def run_audit():
     # Step 3: Apply audit rules
     no_active_el = []       # Deals with no active EL
     eligibility_issues = [] # Wrong eligibility for membership tier
-    moveout_issues = []     # Move-out date inconsistencies
     declined_no_mo = []     # Declined but no move-out date
 
     for deal in deals:
@@ -200,26 +199,14 @@ def run_audit():
                 "decision": el_decision,
             })
 
-        # Rule 4: Non-basic + not declined -> Move-Out should be empty
-        if not is_basic and not is_declined and move_out:
-            # Exception: Lease Break, Transfer also justify move-out
-            if el_decision not in ("Lease Break", "Transfer Request", "Transfered"):
-                moveout_issues.append({
-                    "deal": deal_name,
-                    "room": room_name,
-                    "membership": membership,
-                    "decision": el_decision,
-                    "move_out": move_out,
-                })
-
-    return deals, no_active_el, eligibility_issues, moveout_issues, declined_no_mo
+    return deals, no_active_el, eligibility_issues, declined_no_mo
 
 
 # ── Report Formatting ───────────────────────────────────────────────
 
-def format_report(deals, no_active_el, eligibility_issues, moveout_issues, declined_no_mo):
+def format_report(deals, no_active_el, eligibility_issues, declined_no_mo):
     today_str = date.today().strftime("%B %d, %Y")
-    total = len(no_active_el) + len(eligibility_issues) + len(moveout_issues) + len(declined_no_mo)
+    total = len(no_active_el) + len(eligibility_issues) + len(declined_no_mo)
 
     lines = [
         f"*Deals vs. Expiring Leases Audit -- {today_str}*",
@@ -257,16 +244,6 @@ def format_report(deals, no_active_el, eligibility_issues, moveout_issues, decli
         lines.append("  No issues")
     lines.append("")
 
-    # Move-out should be empty
-    lines.append(f"*Move-Out Filled but Not Declined ({len(moveout_issues)}):*")
-    if moveout_issues:
-        for r in moveout_issues:
-            lines.append(f"  - {r['deal']} -- {r['room']} | {r['membership']} | "
-                         f"Decision: \"{r['decision']}\" | Move-Out: {r['move_out']}")
-    else:
-        lines.append("  No issues")
-    lines.append("")
-
     # Declined without move-out
     lines.append(f"*Declined but No Move-Out Date ({len(declined_no_mo)}):*")
     if declined_no_mo:
@@ -299,8 +276,8 @@ if __name__ == "__main__":
     print("CRM Audit -- Deals vs. Expiring Leases")
     print("=" * 60)
 
-    deals, no_active_el, eligibility_issues, moveout_issues, declined_no_mo = run_audit()
-    report = format_report(deals, no_active_el, eligibility_issues, moveout_issues, declined_no_mo)
+    deals, no_active_el, eligibility_issues, declined_no_mo = run_audit()
+    report = format_report(deals, no_active_el, eligibility_issues, declined_no_mo)
 
     print("\n" + report + "\n")
 
@@ -314,6 +291,6 @@ if __name__ == "__main__":
     # Send to Slack
     send_slack(report)
 
-    total = len(no_active_el) + len(eligibility_issues) + len(moveout_issues) + len(declined_no_mo)
+    total = len(no_active_el) + len(eligibility_issues) + len(declined_no_mo)
     print(f"\nDone. {total} issues flagged.")
     sys.exit(0)
